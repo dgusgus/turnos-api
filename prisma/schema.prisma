@@ -1,0 +1,341 @@
+// ============================================================
+// Sistema de turnos y citas — Unidad Educativa (Nivel 1)
+// Prisma 7 + PostgreSQL
+//
+// Prisma 7: la URL de conexión NO va aquí, va en prisma.config.ts
+// (datasource.url = env("DATABASE_URL")).
+// ============================================================
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ------------------------------------------------------------
+// ENUMS
+// ------------------------------------------------------------
+
+// Roles del PERSONAL. El público (padres, tutores) NO tiene cuenta ni rol:
+// pide citas sin iniciar sesión y se identifica con un código y un enlace secreto.
+enum Rol {
+  ADMIN        // configura sedes, servicios, horarios, usuarios
+  OPERADOR     // secretaría/caja/dirección: aprueba citas, llama y atiende turnos
+}
+
+// Ciclo de vida de una cita:
+//
+//   PENDIENTE ──aprobar──▶ CONFIRMADA ──check-in──▶ EN_COLA ──▶ ATENDIDA
+//       │                      │  └──no llegó──▶ NO_ASISTIO
+//       └──rechazar/vence──▶ RECHAZADA   (también desde CONFIRMADA)
+//   PENDIENTE o CONFIRMADA ──la persona cancela──▶ CANCELADA
+//
+// Un servicio con `requiereAprobacion = false` crea la cita ya CONFIRMADA.
+enum EstadoCita {
+  PENDIENTE    // pidió la cita; espera que el personal la apruebe
+  CONFIRMADA   // aprobada (o aprobada automáticamente); aún no llega
+  EN_COLA      // hizo check-in: ya tiene un turno asociado
+  ATENDIDA
+  RECHAZADA    // el personal la rechazó (con motivo) o venció sin respuesta
+  CANCELADA    // la canceló la propia persona
+  NO_ASISTIO
+}
+
+enum EstadoTurno {
+  ESPERANDO
+  LLAMADO          // el operador lo llamó, aún no se presenta en ventanilla
+  ATENDIENDO
+  FINALIZADO
+  NO_SE_PRESENTO
+  CANCELADO
+}
+
+// OJO: el orden de declaración es el orden de atención.
+// En PostgreSQL, ORDER BY sobre un enum respeta este orden,
+// así la cola se ordena: preferencial -> cita -> normal.
+enum PrioridadTurno {
+  PREFERENCIAL // adultos mayores, embarazadas, personas con discapacidad
+  CITA         // llegó con cita reservada
+  NORMAL
+}
+
+enum OrigenTurno {
+  MOSTRADOR    // lo generó el OPERADOR en el lugar (único origen en Nivel 1)
+  WEB          // (Nivel 2) autoservicio: QR o tótem en el colegio
+  CITA         // se generó por check-in de una cita
+}
+
+// ------------------------------------------------------------
+// ORGANIZACIÓN
+// ------------------------------------------------------------
+
+// Sede: permite crecer a varias unidades/turnos (mañana, tarde) sin
+// rediseñar. Para un solo colegio, tendrás una sola fila.
+model Sede {
+  id          String   @id @default(uuid())
+  nombre      String
+  direccion   String?
+  zonaHoraria String   @default("America/La_Paz")
+  activa      Boolean  @default(true)
+  creadoEn    DateTime @default(now())
+  actualizadoEn DateTime @updatedAt
+
+  usuarios         Usuario[]
+  servicios        Servicio[]
+  ventanillas      Ventanilla[]
+  diasNoLaborables DiaNoLaborable[]
+  citas            Cita[]
+  turnos           Turno[]
+
+  @@map("sedes")
+}
+
+// Usuario = PERSONAL del colegio (ADMIN u OPERADOR). Es lo único que inicia sesión.
+model Usuario {
+  id            String   @id @default(uuid())
+  email         String   @unique
+  passwordHash  String
+  nombre        String
+  rol           Rol      @default(OPERADOR)
+  activo        Boolean  @default(true)
+  sedeId        String?  // sede donde trabaja; null = ve todas las sedes
+  creadoEn      DateTime @default(now())
+  actualizadoEn DateTime @updatedAt
+
+  sede            Sede?   @relation(fields: [sedeId], references: [id])
+  turnosAtendidos Turno[]
+  citasDecididas  Cita[]  @relation("CitaDecididaPor")
+
+  @@index([sedeId])
+  @@map("usuarios")
+}
+
+// Solicitante: la persona que pide atención (padre/tutor), identificada por su CI.
+// NO es un usuario: no tiene contraseña ni inicia sesión. Se crea sola la primera
+// vez que reserva una cita, y sirve para contar sus citas activas (límite anti-abuso)
+// y ver su historial. Un turno de mostrador puede no tener Solicitante (solo nombre).
+model Solicitante {
+  id        String   @id @default(uuid())
+  documento String   @unique // CI (con complemento si lo tiene), normalizada en mayúsculas
+  nombres   String
+  apellidos String
+  telefono  String?
+  creadoEn  DateTime @default(now())
+
+  citas  Cita[]
+  turnos Turno[]
+
+  @@map("solicitantes")
+}
+
+// ------------------------------------------------------------
+// CATÁLOGO DE ATENCIÓN
+// ------------------------------------------------------------
+
+// Servicio = tipo de trámite: Inscripciones, Pensiones (caja),
+// Certificados, Reunión con dirección, etc.
+model Servicio {
+  id          String   @id @default(uuid())
+  sedeId      String
+  nombre      String
+  descripcion String?
+  prefijo     String   // letra del turno: "A" -> A-001
+  duracionMin Int      @default(15) // base para calcular las franjas de citas
+  permiteCita Boolean  @default(true)
+  // false = la cita queda CONFIRMADA al reservar (ej. certificados, caja).
+  // true  = queda PENDIENTE hasta que el personal la apruebe (ej. Dirección).
+  requiereAprobacion Boolean @default(false)
+  activo      Boolean  @default(true)
+  creadoEn    DateTime @default(now())
+  actualizadoEn DateTime @updatedAt
+
+  sede         Sede                 @relation(fields: [sedeId], references: [id])
+  horarios     HorarioAtencion[]
+  ventanillas  VentanillaServicio[]
+  citas        Cita[]
+  turnos       Turno[]
+  contadores   ContadorTurno[]
+
+  @@unique([sedeId, nombre])
+  @@unique([sedeId, prefijo])
+  @@map("servicios")
+}
+
+// Ventanilla: el puesto físico donde se atiende (Ventanilla 1, Secretaría).
+model Ventanilla {
+  id      String  @id @default(uuid())
+  sedeId  String
+  nombre  String
+  activa  Boolean @default(true)
+
+  sede      Sede                 @relation(fields: [sedeId], references: [id])
+  servicios VentanillaServicio[]
+  turnos    Turno[]
+
+  @@unique([sedeId, nombre])
+  @@map("ventanillas")
+}
+
+// Tabla puente: qué servicios atiende cada ventanilla (muchos a muchos).
+model VentanillaServicio {
+  ventanillaId String
+  servicioId   String
+
+  ventanilla Ventanilla @relation(fields: [ventanillaId], references: [id], onDelete: Cascade)
+  servicio   Servicio   @relation(fields: [servicioId], references: [id], onDelete: Cascade)
+
+  @@id([ventanillaId, servicioId])
+  @@map("ventanillas_servicios")
+}
+
+// Horario de un servicio. Varias filas por día permiten turnos partidos
+// (08:00-12:00 y 14:30-18:00).
+// Se guarda en minutos desde medianoche (08:00 = 480) para evitar
+// problemas de zona horaria con horas "sueltas".
+model HorarioAtencion {
+  id         String @id @default(uuid())
+  servicioId String
+  diaSemana  Int    // 1 = lunes ... 7 = domingo
+  inicioMin  Int
+  finMin     Int
+
+  servicio Servicio @relation(fields: [servicioId], references: [id], onDelete: Cascade)
+
+  @@index([servicioId, diaSemana])
+  @@map("horarios_atencion")
+}
+
+// Feriados, vacaciones, suspensión de actividades.
+model DiaNoLaborable {
+  id     String   @id @default(uuid())
+  sedeId String
+  fecha  DateTime @db.Date
+  motivo String
+
+  sede Sede @relation(fields: [sedeId], references: [id], onDelete: Cascade)
+
+  @@unique([sedeId, fecha])
+  @@map("dias_no_laborables")
+}
+
+// ------------------------------------------------------------
+// OPERACIÓN
+// ------------------------------------------------------------
+
+// Cita: reserva con fecha y hora.
+//
+// IMPORTANTE (doble reserva): debe haber UNA sola cita activa por
+// servicio y hora de inicio. Prisma no puede declarar un índice único
+// parcial, así que se agrega a mano en la migración (ver README/SQL):
+//
+//   CREATE UNIQUE INDEX citas_servicio_inicio_activa_uk
+//   ON citas ("servicioId", "inicio")
+//   WHERE estado NOT IN ('CANCELADA', 'NO_ASISTIO', 'RECHAZADA');
+//
+// "Parcial" = solo cuenta las citas que ocupan la hora; una cita
+// cancelada o rechazada la libera para otra persona.
+//
+// La persona que reserva NO inicia sesión. Cada cita lleva dos identificadores:
+//  - codigoPublico: corto ("R-K7M2Q"); aparece en la agenda pública y se dicta
+//    en ventanilla. NO es secreto.
+//  - tokenHash: hash (SHA-256) del enlace secreto que recibe quien reserva. Con ese
+//    enlace ve el estado y cancela. En la BD solo se guarda el hash, nunca el token.
+model Cita {
+  id            String     @id @default(uuid())
+  codigoPublico String     @unique
+  tokenHash     String     @unique
+  sedeId        String
+  servicioId    String
+  solicitanteId String
+  inicio        DateTime
+  fin           DateTime
+  estado        EstadoCita @default(PENDIENTE)
+
+  // Datos con los que se reservó, copiados en la cita a propósito: el CI no es
+  // secreto, así que alguien podría reservar con el CI de otra persona; la ficha
+  // de Solicitante no debe pisar ni ser pisada por lo que se escribió aquí.
+  nombres          String
+  apellidos        String
+  telefono         String
+  estudianteNombre String
+  estudianteCurso  String
+  motivo           String
+
+  motivoRechazo String?   // lo ve quien reservó, en "mi cita"
+  decididaPorId String?   // operador que aprobó o rechazó (null si fue automático)
+  decididaEn    DateTime?
+  canceladaEn   DateTime?
+  creadoEn      DateTime  @default(now())
+  actualizadoEn DateTime  @updatedAt
+
+  sede        Sede        @relation(fields: [sedeId], references: [id])
+  servicio    Servicio    @relation(fields: [servicioId], references: [id])
+  solicitante Solicitante @relation(fields: [solicitanteId], references: [id])
+  decididaPor Usuario?    @relation("CitaDecididaPor", fields: [decididaPorId], references: [id])
+  turno       Turno?      // se crea al hacer check-in
+
+  @@index([sedeId, inicio])
+  @@index([servicioId, inicio])
+  @@index([solicitanteId, estado])
+  @@index([estado, creadoEn]) // para vencer las citas PENDIENTES sin respuesta
+  @@map("citas")
+}
+
+// Turno: lugar en la cola. Una cita se convierte en turno al llegar.
+model Turno {
+  id            String         @id @default(uuid())
+  sedeId        String
+  servicioId    String
+  citaId        String?        @unique // 1 cita -> máximo 1 turno
+  solicitanteId String?        // null si es visitante sin registro
+  ventanillaId  String?        // se asigna al llamarlo
+  atendidoPorId String?        // operador que lo atendió
+
+  fecha         DateTime       @db.Date // día operativo; el contador se reinicia cada día
+  numero        Int            // 1, 2, 3... por servicio y día
+  codigo        String         // "A-012", lo que ve el público
+  prioridad     PrioridadTurno @default(NORMAL)
+  origen        OrigenTurno    @default(MOSTRADOR)
+  estado        EstadoTurno    @default(ESPERANDO)
+
+  nombreVisitante      String? // para turnos de mostrador sin registro
+  estudianteReferencia String?
+  observacion          String?
+
+  // Marcas de tiempo: de aquí salen los reportes y el tiempo estimado de espera
+  creadoEn          DateTime  @default(now())
+  llamadoEn         DateTime?
+  inicioAtencionEn  DateTime?
+  finAtencionEn     DateTime?
+
+  sede        Sede         @relation(fields: [sedeId], references: [id])
+  servicio    Servicio     @relation(fields: [servicioId], references: [id])
+  cita        Cita?        @relation(fields: [citaId], references: [id])
+  solicitante Solicitante? @relation(fields: [solicitanteId], references: [id])
+  ventanilla  Ventanilla?  @relation(fields: [ventanillaId], references: [id])
+  atendidoPor Usuario?     @relation(fields: [atendidoPorId], references: [id])
+
+  // No pueden existir dos "A-012" el mismo día
+  @@unique([servicioId, fecha, numero])
+  // Consulta más frecuente: "siguiente turno a llamar" y pantalla pública
+  @@index([sedeId, servicioId, fecha, estado, prioridad, creadoEn])
+  @@index([ventanillaId, estado])
+  @@map("turnos")
+}
+
+// Contador de numeración por servicio y día.
+// Se incrementa DENTRO de una transacción, así dos personas que sacan
+// turno a la vez nunca reciben el mismo número.
+model ContadorTurno {
+  servicioId String
+  fecha      DateTime @db.Date
+  ultimo     Int      @default(0)
+
+  servicio Servicio @relation(fields: [servicioId], references: [id], onDelete: Cascade)
+
+  @@id([servicioId, fecha])
+  @@map("contadores_turno")
+}
