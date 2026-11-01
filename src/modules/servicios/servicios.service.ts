@@ -194,7 +194,9 @@ export const serviciosService = {
       }),
       prisma.servicio.findFirst({ where: { id }, include: INCLUIR }),
     ]);
-
+    // findFirst puede devolver null (en teoría, si alguien lo borró justo ahora):
+    // se trata como "no encontrado" para que TypeScript sepa que de aquí en adelante existe.
+    if (!servicio) throw AppError.notFound("Servicio no encontrado");
     const advertencias: string[] = [];
     const n = await citasVigentesFuturas(id);
     if (n > 0) {
