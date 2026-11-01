@@ -34,7 +34,7 @@ Una cita `PENDIENTE` ocupa la hora. Si nadie responde en `CITA_PENDIENTE_EXPIRA_
 - [x] **API pública de citas** (sin login): servicios, disponibilidad, reservar, agenda del día, consultar, cancelar
 - [x] **Bandeja del personal**: listar, aprobar y rechazar citas (con motivo)
 - [x] Seed: sede de ejemplo, 4 servicios (Dirección requiere aprobación), horarios, ventanillas, admin y operador
-- [ ] Paso 2: servicios y horarios (CRUD del ADMIN) — **hazlo tú**, ver abajo
+- [x] **Paso 2: servicios, horarios y días no laborables** (CRUD del ADMIN). Guía para estudiarlo abajo
 - [ ] Paso 4: turnos y cola (operador) + check-in de citas · Paso 5: tiempo real y pantalla pública de turnos
 
 ## Primer arranque
@@ -107,13 +107,18 @@ Respuestas: `{ "data": ..., "meta": ... }` o `{ "error": { "code", "message", "d
 
 **Personal (JWT)**
 
-| Método     | Ruta                                         | Acceso                                            |
-| ---------- | -------------------------------------------- | ------------------------------------------------- |
-| POST       | `/auth/login` · GET `/auth/me`               | Público · autenticado                             |
-| GET / POST | `/users` · GET / PATCH / DELETE `/users/:id` | ADMIN                                             |
-| GET        | `/citas?fecha&estado&search&page&limit`      | ADMIN, OPERADOR (sin `fecha`: de hoy en adelante) |
-| POST       | `/citas/:id/aprobar`                         | ADMIN, OPERADOR                                   |
-| POST       | `/citas/:id/rechazar` `{motivo}`             | ADMIN, OPERADOR                                   |
+| Método     | Ruta                                                             | Acceso                                            |
+| ---------- | ---------------------------------------------------------------- | ------------------------------------------------- |
+| POST       | `/auth/login` · GET `/auth/me`                                   | Público · autenticado                             |
+| GET / POST | `/users` · GET / PATCH / DELETE `/users/:id`                     | ADMIN                                             |
+| GET        | `/citas?fecha&estado&search&page&limit`                          | ADMIN, OPERADOR (sin `fecha`: de hoy en adelante) |
+| POST       | `/citas/:id/aprobar`                                             | ADMIN, OPERADOR                                   |
+| POST       | `/citas/:id/rechazar` `{motivo}`                                 | ADMIN, OPERADOR                                   |
+| GET / POST | `/servicios` · GET / PATCH / DELETE `/servicios/:id`             | ADMIN (Paso 2)                                    |
+| PUT        | `/servicios/:id/horarios` `{horarios:[{diaSemana,desde,hasta}]}` | ADMIN: reemplaza la semana completa               |
+| GET / POST | `/dias-no-laborables` · DELETE `/dias-no-laborables/:id`         | ADMIN (feriados, suspensiones)                    |
+
+`PATCH /servicios/:id`, `PUT .../horarios` y `POST /dias-no-laborables` responden `{ data, advertencias: [] }`: guardan igual, pero avisan si el cambio afecta a citas ya reservadas (que **no** se tocan solas).
 
 ### Qué ve cada quien (privacidad)
 
@@ -163,18 +168,26 @@ Ideas clave (explicadas en los comentarios del schema):
 - **Vencimiento de pendientes**: se aplica al consultar (sin cron). Basta para un colegio; Nivel 2: un job programado.
 - JWT sin revocación (heredado del Nivel 1): un usuario desactivado conserva acceso hasta que su token expire.
 
-## Siguiente: Paso 2, servicios y horarios (hazlo tú)
+## Paso 2 (hecho): cómo estudiarlo
 
-El objetivo es que **entiendas** el patrón de un módulo. Copia `starter-api/src/modules/products/` a `src/modules/servicios/` y adáptalo:
+Tres módulos nuevos, todos con la misma forma que ya viste (dto → mapper → service → controller → routes). **Orden de lectura sugerido:**
 
-1. `servicios.dto.ts`: campos de `Servicio` (`nombre`, `descripcion`, `prefijo` de 1-2 letras en mayúscula, `duracionMin`, `permiteCita`, **`requiereAprobacion`**, `activo`). El `sedeId` sale del usuario autenticado, no del body.
-2. `servicios.mapper.ts`: qué campos expone la API.
-3. `servicios.service.ts`: reemplaza `producto` por `servicio`; el filtro siempre incluye `sedeId`.
-4. `servicios.routes.ts`: leer = personal; escribir = solo ADMIN.
-5. Regístralo en `src/routes.ts` y escribe 3 tests (401, 403, 400).
-6. Después, `horarios` dentro del servicio: `POST /servicios/:id/horarios` (valida `inicioMin < finMin` y que no se solapen).
+1. `src/common/sede.ts` — de dónde sale el `sedeId`: del usuario autenticado, **nunca** del body. Es la regla de seguridad de todo el paso.
+2. `src/modules/servicios/servicios.dto.ts` — qué se acepta. Fíjate en por qué los campos van **sin defaults** y solo `create` los agrega (si el PATCH los heredara, reiniciaría campos sin avisar).
+3. `src/modules/servicios/horarios.validacion.ts` — reglas puras (inicio < fin, ventana ≥ duración, sin solapes). Sus tests están al inicio de `tests/servicios.test.ts`.
+4. `src/modules/servicios/servicios.service.ts` — la lógica: duplicados con mensaje claro, no eliminar si hay historial, `advertencias`, y `reemplazarHorarios` dentro de una **transacción**.
+5. `src/modules/dias-no-laborables/` — el mismo patrón, más pequeño.
+6. `tests/servicios.test.ts` — tres niveles de prueba: funciones puras, HTTP sin BD, y service con una BD falsa.
 
-Mira `src/modules/citas/` y `src/modules/public/` como ejemplo de un módulo completo (dto, mapper, service, controller, routes). Preguntas para pensar: ¿por qué `prefijo` debe ser único por sede? ¿qué pasa con las citas existentes si borras un servicio? ¿qué pasa si el ADMIN cambia `duracionMin` y ya hay citas reservadas?
+**Preguntas con respuesta en el código** (las respuestas están en los comentarios):
+
+- ¿Por qué `prefijo` es único por sede? Para que el turno `A-001` nunca sea ambiguo.
+- ¿Qué pasa si borras un servicio con citas? No se puede (409): es historial. Se **desactiva**.
+- ¿Y si el ADMIN cambia `duracionMin` con citas reservadas? Esas citas conservan su hora (cada cita guarda su `inicio`/`fin`); solo las nuevas usan la duración nueva. La API lo avisa en `advertencias`.
+- ¿Por qué `PUT` y no `POST` para los horarios? Porque reemplaza el recurso completo: el ADMIN edita la semana entera y se guarda de golpe, en una transacción.
+- ¿Por qué un servicio de otra sede responde 404 y no 403? Para no revelar que existe.
+
+**Límites conocidos de este paso:** un ADMIN sin sede asignada trabaja sobre la primera sede activa (Nivel 1 = un colegio); no hay gestión de sedes ni ventanillas todavía; las consultas de Prisma de este paso se probaron con una BD falsa, así que **verifícalas contra tu PostgreSQL real** (`pnpm dev` y prueba desde el panel).
 
 ## Scripts
 

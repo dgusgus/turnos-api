@@ -82,6 +82,12 @@ export function diaSemanaISO(fecha: string): number {
 /** Para columnas `@db.Date` de Prisma. */
 export const fechaADate = (fecha: string) => new Date(`${fecha}T00:00:00Z`);
 
+/** "08:00" → 480 (lo inverso de minAHora). Asume el formato ya validado (HH:MM). */
+export const horaAMin = (hora: string) => {
+  const [h, m] = hora.split(":").map(Number) as [number, number];
+  return h * 60 + m;
+};
+
 /** 480 → "08:00" */
 export const minAHora = (min: number) =>
   `${dosDigitos(Math.floor(min / 60))}:${dosDigitos(min % 60)}`;
