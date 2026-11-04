@@ -36,7 +36,7 @@ export const crearCitaSchema = z.object({
 });
 
 // El código se acepta "como lo escriba la gente": "r-k7m2q", "R K7M2Q", "RK7M2Q"...
-const codigoSchema = z
+export const codigoSchema = z
   .string()
   .trim()
   .transform((v) => {
