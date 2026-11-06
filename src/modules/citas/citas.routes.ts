@@ -9,5 +9,7 @@ export const citasRouter = Router();
 citasRouter.use(authenticate, authorize("ADMIN", "OPERADOR"));
 
 citasRouter.get("/", citasController.list);
+// El personal también puede crear citas a nombre de alguien (sin el tope de citas del público).
+citasRouter.post("/", citasController.crear);
 citasRouter.post("/:id/aprobar", citasController.aprobar);
 citasRouter.post("/:id/rechazar", citasController.rechazar);

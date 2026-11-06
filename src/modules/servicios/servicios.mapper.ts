@@ -10,6 +10,7 @@ export interface ServicioRow {
   duracionMin: number;
   permiteCita: boolean;
   requiereAprobacion: boolean;
+  fichasPorDia?: number | null;
   activo: boolean;
   creadoEn: Date;
   actualizadoEn: Date;
@@ -24,6 +25,7 @@ export const toServicioDto = (s: ServicioRow) => ({
   duracionMin: s.duracionMin,
   permiteCita: s.permiteCita,
   requiereAprobacion: s.requiereAprobacion,
+  fichasPorDia: s.fichasPorDia ?? null,
   activo: s.activo,
   horarios: [...s.horarios]
     .sort((a, b) => a.diaSemana - b.diaSemana || a.inicioMin - b.inicioMin)

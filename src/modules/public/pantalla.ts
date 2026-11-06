@@ -4,7 +4,7 @@ import { AppError } from "../../common/errors.js";
 import { suscribirCola } from "../../lib/eventos.js";
 import { prisma } from "../../lib/prisma.js";
 import { fechaADate, hoyLocal } from "../../lib/time.js";
-import { ESTADOS_ACTIVOS } from "../turnos/turnos.estados.js";
+import { ESTADOS_ACTIVOS, ORDEN_DE_ATENCION } from "../turnos/turnos.estados.js";
 
 // PANTALLA PÚBLICA de turnos (la TV de la sala de espera). Sin login.
 //
@@ -37,8 +37,8 @@ export async function pantalla(req: Request, res: Response) {
     }),
     prisma.turno.findMany({
       where: { sedeId: sede.id, fecha, estado: { in: ESTADOS_ACTIVOS } },
-      // Mismo orden con el que se llama: preferencial → cita → normal, y por llegada.
-      orderBy: [{ prioridad: "asc" }, { creadoEn: "asc" }],
+      // Mismo orden con el que se llama (ver ORDEN_DE_ATENCION).
+      orderBy: [...ORDEN_DE_ATENCION],
       select: {
         codigo: true,
         estado: true,

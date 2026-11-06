@@ -54,10 +54,11 @@ describe("rutas públicas: validación", () => {
         "documento",
         "telefono",
         "estudianteNombre",
-        "estudianteCurso",
         "motivo",
       ]),
     );
+    // El curso es opcional (solo los colegios lo piden): su ausencia no es un error.
+    expect(campos(res)).not.toContain("estudianteCurso");
   });
 
   it("reservar con teléfono inválido → 400", async () => {

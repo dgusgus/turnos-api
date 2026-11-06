@@ -1,29 +1,22 @@
 import { hashPassword } from "../src/lib/password.js";
 import { prisma } from "../src/lib/prisma.js";
+import { PERFILES } from "./perfiles.js";
 
 // Seed idempotente: puedes correrlo varias veces sin duplicar datos.
-// Crea una sede de ejemplo con servicios, horarios, ventanillas y personal.
+// Crea la sede, servicios, horarios, ventanillas y el administrador del rubro elegido:
+//   SEED_PERFIL=colegio (por defecto) | clinica | oficina   — ver prisma/perfiles.ts
 
 const SEDE_ID = "00000000-0000-4000-8000-000000000001";
-const MANANA = [480, 720] as const; // 08:00 - 12:00 (minutos desde medianoche)
-const TARDE = [870, 1080] as const; // 14:30 - 18:00
-
-// requiereAprobacion: la cita queda PENDIENTE hasta que el personal la apruebe.
-// Dirección sí (el director decide si atiende); los trámites simples se confirman solos.
-const SERVICIOS = [
-  { nombre: "Inscripciones y matrícula", prefijo: "I", duracionMin: 20, requiereAprobacion: false },
-  { nombre: "Caja - Pensiones", prefijo: "P", duracionMin: 10, requiereAprobacion: false },
-  { nombre: "Certificados y documentos", prefijo: "C", duracionMin: 15, requiereAprobacion: false },
-  { nombre: "Atención de Dirección", prefijo: "D", duracionMin: 30, requiereAprobacion: true },
-];
-
-const VENTANILLAS = [
-  { nombre: "Secretaría", servicios: ["Inscripciones y matrícula", "Certificados y documentos"] },
-  { nombre: "Caja", servicios: ["Caja - Pensiones"] },
-  { nombre: "Dirección", servicios: ["Atención de Dirección"] },
-];
 
 async function main() {
+  const perfilId = process.env.SEED_PERFIL ?? "colegio";
+  const perfil = PERFILES[perfilId];
+  if (!perfil) {
+    throw new Error(
+      `SEED_PERFIL="${perfilId}" no existe. Opciones: ${Object.keys(PERFILES).join(", ")}`,
+    );
+  }
+
   const produccion = process.env.NODE_ENV === "production";
   const email = process.env.SEED_ADMIN_EMAIL ?? (produccion ? undefined : "admin@example.com");
   const password = process.env.SEED_ADMIN_PASSWORD ?? (produccion ? undefined : "Admin12345!");
@@ -41,7 +34,7 @@ async function main() {
 
   // Servicios + horarios (lunes a viernes, mañana y tarde)
   const servicioIds: Record<string, string> = {};
-  for (const s of SERVICIOS) {
+  for (const s of perfil.servicios) {
     const servicio = await prisma.servicio.upsert({
       where: { sedeId_nombre: { sedeId: SEDE_ID, nombre: s.nombre } },
       update: {},
@@ -50,20 +43,22 @@ async function main() {
     servicioIds[s.nombre] = servicio.id;
 
     if ((await prisma.horarioAtencion.count({ where: { servicioId: servicio.id } })) === 0) {
-      const horarios = [1, 2, 3, 4, 5].flatMap((diaSemana) =>
-        [MANANA, TARDE].map(([inicioMin, finMin]) => ({
-          servicioId: servicio.id,
-          diaSemana,
-          inicioMin,
-          finMin,
-        })),
+      const horarios = perfil.horarios.flatMap(({ dias, bloques }) =>
+        dias.flatMap((diaSemana) =>
+          bloques.map(([inicioMin, finMin]) => ({
+            servicioId: servicio.id,
+            diaSemana,
+            inicioMin,
+            finMin,
+          })),
+        ),
       );
       await prisma.horarioAtencion.createMany({ data: horarios });
     }
   }
 
   // Ventanillas y qué servicios atiende cada una
-  for (const v of VENTANILLAS) {
+  for (const v of perfil.ventanillas) {
     await prisma.ventanilla.upsert({
       where: { sedeId_nombre: { sedeId: SEDE_ID, nombre: v.nombre } },
       update: {},
@@ -104,7 +99,7 @@ async function main() {
     console.log("Operador de prueba: operador@example.com / Operador12345!");
   }
 
-  console.log("Sede, servicios, horarios y ventanillas listos");
+  console.log(`Perfil «${perfilId}»: sede, servicios, horarios y ventanillas listos`);
 }
 
 main()

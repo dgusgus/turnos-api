@@ -9,6 +9,8 @@ import {
   codigoTurno,
   ESTADOS_ACTIVOS,
   ESTADOS_EN_VENTANILLA,
+  leerCodigoFicha,
+  ORDEN_DE_ATENCION,
   TEXTO_ACCION,
   TRANSICIONES,
   type Accion,
@@ -20,9 +22,9 @@ import {
 //  · Todo es "de hoy" y de la sede del personal. El número del turno se reinicia cada día.
 //  · NUMERACIÓN sin repetidos: un contador por (servicio, día) que se incrementa DENTRO de una
 //    transacción. Dos operadores sacando turno a la vez nunca reciben el mismo número.
-//  · ORDEN DE ATENCIÓN: prioridad (preferencial → cita → normal) y, dentro de cada una, por orden
-//    de llegada. El orden de las prioridades es el del enum en schema.prisma (PostgreSQL ordena
-//    los enum por su declaración).
+//  · ORDEN DE ATENCIÓN: prioridad (preferencial → cita/ficha → normal); dentro de ella, las fichas
+//    por su número y el resto por orden de llegada (ver ORDEN_DE_ATENCION). El orden de las
+//    prioridades es el del enum en schema.prisma (PostgreSQL ordena los enum por su declaración).
 //  · CARRERAS: dos operadores pulsando «Llamar siguiente» a la vez no deben tomar el mismo turno.
 //    Cada cambio de estado es un UPDATE condicionado («solo si sigue ESPERANDO»): si count = 0,
 //    otro se adelantó. Esto se llama bloqueo optimista.
@@ -39,9 +41,8 @@ const INCLUIR = {
       inicio: true,
     },
   },
+  ficha: { select: { codigo: true } },
 } as const;
-
-const ORDEN_DE_ATENCION = [{ prioridad: "asc" }, { creadoEn: "asc" }] as const;
 
 const esConflictoUnico = (e: unknown) =>
   typeof e === "object" && e !== null && "code" in e && e.code === "P2002";
@@ -51,8 +52,10 @@ interface NuevoTurno {
   servicio: { id: string; prefijo: string };
   fecha: Date;
   prioridad: PrioridadTurno;
-  origen: "MOSTRADOR" | "CITA";
+  origen: "MOSTRADOR" | "CITA" | "FICHA";
   citaId?: string;
+  fichaId?: string;
+  numeroFicha?: number;
   solicitanteId?: string;
   nombreVisitante?: string | null;
   estudianteReferencia?: string | null;
@@ -77,6 +80,8 @@ async function crearConNumero(tx: Prisma.TransactionClient, t: NuevoTurno) {
       prioridad: t.prioridad,
       origen: t.origen,
       citaId: t.citaId,
+      fichaId: t.fichaId,
+      numeroFicha: t.numeroFicha,
       solicitanteId: t.solicitanteId,
       nombreVisitante: t.nombreVisitante,
       estudianteReferencia: t.estudianteReferencia,
@@ -101,6 +106,51 @@ async function buscar(id: string, sedeId: string) {
   const turno = await prisma.turno.findFirst({ where: { id, sedeId }, include: INCLUIR });
   if (!turno) throw AppError.notFound("Turno no encontrado");
   return turno;
+}
+
+// Check-in de una FICHA: debe ser de hoy y estar ACTIVA. Mismo molde que el de la cita.
+async function checkinFicha(
+  { prefijo, numero }: { prefijo: string; numero: number },
+  sedeId: string,
+  tz: string,
+) {
+  const hoy = hoyLocal(tz);
+  const ficha = await prisma.ficha.findFirst({
+    where: { sedeId, numero, servicio: { prefijo, sedeId }, fecha: { lte: fechaADate(hoy) } },
+    orderBy: { fecha: "desc" }, // la más reciente con ese código (las viejas no cuentan)
+    include: { servicio: { select: { id: true, prefijo: true } } },
+  });
+  if (!ficha) throw AppError.notFound("No hay ninguna ficha con ese código");
+
+  const diaFicha = ficha.fecha.toISOString().slice(0, 10);
+  if (diaFicha !== hoy) throw AppError.conflict(`Esta ficha era para el ${diaFicha}: ya venció`);
+  if (ficha.estado === "EN_COLA") throw AppError.conflict("Esta ficha ya hizo check-in");
+  if (ficha.estado !== "ACTIVA") {
+    throw AppError.conflict(`No se puede hacer check-in: la ficha está ${ficha.estado}`);
+  }
+
+  return conReintento(() =>
+    prisma.$transaction(async (tx) => {
+      // Reclamar la ficha: solo pasa si SIGUE activa (dos operadores a la vez: uno gana).
+      const { count } = await tx.ficha.updateMany({
+        where: { id: ficha.id, estado: "ACTIVA" },
+        data: { estado: "EN_COLA" },
+      });
+      if (count === 0) throw AppError.conflict("Esta ficha ya hizo check-in");
+
+      return crearConNumero(tx, {
+        sedeId,
+        servicio: ficha.servicio,
+        fecha: fechaADate(hoy),
+        prioridad: "CITA",
+        origen: "FICHA",
+        fichaId: ficha.id,
+        numeroFicha: ficha.numero,
+        nombreVisitante: ficha.nombre,
+        estudianteReferencia: ficha.referencia,
+      });
+    }),
+  );
 }
 
 const base = {
@@ -145,9 +195,13 @@ const base = {
     );
   },
 
-  // Check-in: convierte una cita CONFIRMADA en un turno (prioridad CITA) y la pasa a EN_COLA.
+  // Check-in: convierte una cita CONFIRMADA o una ficha de HOY en un turno (prioridad CITA) y la
+  // pasa a EN_COLA. El código dice cuál es: "P-F012" es una ficha; "R-K7M2Q", una cita.
   async checkin(codigo: string, actorId: string) {
     const { sedeId, tz } = await sedeDelPersonal(actorId);
+    const deFicha = leerCodigoFicha(codigo);
+    if (deFicha) return checkinFicha(deFicha, sedeId, tz);
+
     const cita = await prisma.cita.findFirst({
       where: { codigoPublico: codigo, sedeId },
       include: { servicio: { select: { id: true, prefijo: true } } },
@@ -267,8 +321,12 @@ const base = {
       if (count === 0) throw AppError.conflict("El turno cambió de estado. Actualiza la pantalla.");
 
       // Si el turno nació de una cita, la cita también cierra su ciclo (atendida / no asistió).
-      if (t.cita && turno.citaId) {
-        await tx.cita.update({ where: { id: turno.citaId }, data: { estado: t.cita } });
+      if (t.cierre && turno.citaId) {
+        await tx.cita.update({ where: { id: turno.citaId }, data: { estado: t.cierre } });
+      }
+      // Igual con la ficha de origen.
+      if (t.cierre && turno.fichaId) {
+        await tx.ficha.update({ where: { id: turno.fichaId }, data: { estado: t.cierre } });
       }
     });
     return buscar(id, sedeId);

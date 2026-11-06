@@ -29,7 +29,9 @@ export const telefonoSchema = z
 export const nombresSchema = texto(2, 80);
 export const apellidosSchema = texto(2, 80);
 export const estudianteNombreSchema = texto(3, 100);
-export const estudianteCursoSchema = texto(1, 30);
+// Dato extra de la persona atendida (en un colegio, el curso). Es OPCIONAL: en otros rubros
+// (clínica, oficina) no se pide, y se guarda vacío. Así no hace falta tocar la base de datos.
+export const estudianteCursoSchema = texto(0, 30).default("");
 export const motivoSchema = texto(3, 300);
 
 export const fechaSchema = z.iso.date("Fecha inválida (usa AAAA-MM-DD)");

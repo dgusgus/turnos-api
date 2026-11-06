@@ -31,6 +31,8 @@ const camposServicio = {
   duracionMin: z.number().int().min(5).max(240).multipleOf(5, "Debe ser múltiplo de 5"),
   permiteCita: z.boolean(),
   requiereAprobacion: z.boolean(),
+  // Fichas que se entregan por día; null = el servicio no usa fichas.
+  fichasPorDia: z.number().int().min(1, "Mínimo 1").max(500, "Máximo 500").nullable(),
   activo: z.boolean(),
 };
 
@@ -39,6 +41,7 @@ export const createServicioSchema = z.object({
   duracionMin: camposServicio.duracionMin.default(15),
   permiteCita: camposServicio.permiteCita.default(true),
   requiereAprobacion: camposServicio.requiereAprobacion.default(false),
+  fichasPorDia: camposServicio.fichasPorDia.default(null),
   activo: camposServicio.activo.default(true),
 });
 

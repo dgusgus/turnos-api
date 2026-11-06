@@ -34,9 +34,15 @@ const SERVICIO_RESUMEN = { select: { nombre: true, prefijo: true } } as const;
 const esConflictoUnico = (e: unknown) =>
   typeof e === "object" && e !== null && "code" in e && e.code === "P2002";
 
-async function cargarServicioParaCitas(servicioId: string) {
+async function cargarServicioParaCitas(servicioId: string, sedeId?: string) {
   const servicio = await prisma.servicio.findFirst({
-    where: { id: servicioId, activo: true, permiteCita: true, sede: { activa: true } },
+    where: {
+      id: servicioId,
+      activo: true,
+      permiteCita: true,
+      sede: { activa: true },
+      ...(sedeId && { sedeId }), // el personal solo agenda en SU sede
+    },
     include: { sede: { select: { id: true, nombre: true, zonaHoraria: true } }, horarios: true },
   });
   if (!servicio) throw AppError.notFound("Este servicio no está disponible para citas");
@@ -127,9 +133,19 @@ export const publicService = {
   },
 
   // Reservar. El estado inicial depende del servicio: CONFIRMADA o PENDIENTE (aprobación).
-  async crear(input: CrearCitaInput, ahora = new Date()) {
+  //
+  // `personal` = la cita la crea alguien del personal (autenticado) a nombre de una persona.
+  // Es personal autorizado, así que: (1) NO le aplica el tope de citas vigentes por persona
+  // (ese límite frena el abuso del público, no al personal), y (2) la cita nace CONFIRMADA sin
+  // pasar por aprobación (quien la crea ya es quien aprueba). El resto de reglas SÍ aplican:
+  // la hora debe existir y estar libre, y no puede ser en feriado ni fuera del horario.
+  async crear(
+    input: CrearCitaInput,
+    ahora = new Date(),
+    personal?: { sedeId: string; actorId: string },
+  ) {
     await liberarPendientesVencidas(ahora);
-    const servicio = await cargarServicioParaCitas(input.servicioId);
+    const servicio = await cargarServicioParaCitas(input.servicioId, personal?.sedeId);
     const tz = servicio.sede.zonaHoraria;
 
     // 1) La hora pedida debe ser EXACTAMENTE una franja válida (no confiamos en el cliente).
@@ -145,18 +161,20 @@ export const publicService = {
       throw AppError.badRequest("Ya no se puede reservar ese horario, elige uno más adelante");
     }
 
-    // 2) Límite por persona (CI o teléfono): frena que una persona acapare horarios.
-    const vigentes = await prisma.cita.count({
-      where: {
-        estado: { in: ESTADOS_VIGENTES },
-        inicio: { gte: ahora },
-        OR: [{ solicitante: { documento: input.documento } }, { telefono: input.telefono }],
-      },
-    });
-    if (vigentes >= env.CITA_MAX_ACTIVAS) {
-      throw AppError.conflict(
-        `Ya tienes ${vigentes} citas vigentes (máximo ${env.CITA_MAX_ACTIVAS}). Cancela una o espera a ser atendido.`,
-      );
+    // 2) Límite por persona (CI o teléfono): frena que el PÚBLICO acapare horarios. No aplica al personal.
+    if (!personal) {
+      const vigentes = await prisma.cita.count({
+        where: {
+          estado: { in: ESTADOS_VIGENTES },
+          inicio: { gte: ahora },
+          OR: [{ solicitante: { documento: input.documento } }, { telefono: input.telefono }],
+        },
+      });
+      if (vigentes >= env.CITA_MAX_ACTIVAS) {
+        throw AppError.conflict(
+          `Ya tienes ${vigentes} citas vigentes (máximo ${env.CITA_MAX_ACTIVAS}). Cancela una o espera a ser atendido.`,
+        );
+      }
     }
 
     // 3) ¿Alguien tomó la hora? (la BD lo garantiza igual con el índice único parcial)
@@ -179,7 +197,8 @@ export const publicService = {
       },
     });
 
-    const estado: EstadoCita = servicio.requiereAprobacion ? "PENDIENTE" : "CONFIRMADA";
+    const estado: EstadoCita =
+      servicio.requiereAprobacion && !personal ? "PENDIENTE" : "CONFIRMADA";
 
     // 5) Crear. Si falla por duplicado hay dos causas: otra persona ganó la hora
     //    (error al usuario) o el código corto chocó por azar (se reintenta con otro).
@@ -203,6 +222,7 @@ export const publicService = {
             estudianteCurso: input.estudianteCurso,
             motivo: input.motivo,
             decididaEn: estado === "CONFIRMADA" ? ahora : null,
+            ...(personal && { decididaPorId: personal.actorId }),
           },
           include: { servicio: SERVICIO_RESUMEN },
         });

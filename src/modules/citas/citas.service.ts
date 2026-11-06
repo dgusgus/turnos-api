@@ -1,10 +1,13 @@
 import { AppError } from "../../common/errors.js";
 import { skipOf } from "../../common/pagination.js";
+import { sedeDelPersonal } from "../../common/sede.js";
 import { hoyLocal, limitesDelDia } from "../../lib/time.js";
 import { prisma } from "../../lib/prisma.js";
 import type { ListCitasQuery } from "./citas.dto.js";
 import { puedeAprobar, puedeRechazar, type EstadoCita } from "./citas.estados.js";
 import { liberarPendientesVencidas } from "./citas.vencimiento.js";
+import type { CrearCitaInput } from "../public/public.dto.js";
+import { publicService } from "../public/public.service.js";
 
 const incluir = {
   servicio: { select: { id: true, nombre: true, prefijo: true } },
@@ -31,6 +34,13 @@ export const citasService = {
       select: { zonaHoraria: true },
     });
     return { sedeId: null, tz: sede?.zonaHoraria ?? "America/La_Paz" };
+  },
+
+  // El personal agenda una cita a nombre de alguien (ej. en el mostrador). Reutiliza la misma
+  // lógica que el público, con las excepciones de `publicService.crear` para el personal.
+  async crearPorPersonal(input: CrearCitaInput, actorId: string) {
+    const { sedeId } = await sedeDelPersonal(actorId);
+    return publicService.crear(input, new Date(), { sedeId, actorId });
   },
 
   // Sin `fecha` devuelve las citas de hoy en adelante (incluye las pendientes futuras).

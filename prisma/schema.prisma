@@ -66,6 +66,20 @@ enum OrigenTurno {
   MOSTRADOR    // lo generó el OPERADOR en el lugar (único origen en Nivel 1)
   WEB          // (Nivel 2) autoservicio: QR o tótem en el colegio
   CITA         // se generó por check-in de una cita
+  FICHA        // se generó por check-in de una ficha
+}
+
+// Ciclo de vida de una FICHA (número con cupo limitado por día, sin hora):
+//
+//   ACTIVA ──check-in el día de la ficha──▶ EN_COLA ──▶ ATENDIDA
+//      │                                        └──no se presentó──▶ NO_ASISTIO
+//      └──cancelar──▶ CANCELADA
+enum EstadoFicha {
+  ACTIVA       // entregada; espera su día
+  EN_COLA      // hizo check-in: ya tiene un turno asociado
+  ATENDIDA
+  NO_ASISTIO
+  CANCELADA    // libera su cupo (el número no se reutiliza)
 }
 
 // ------------------------------------------------------------
@@ -89,6 +103,7 @@ model Sede {
   diasNoLaborables DiaNoLaborable[]
   citas            Cita[]
   turnos           Turno[]
+  fichas           Ficha[]
 
   @@map("sedes")
 }
@@ -108,6 +123,7 @@ model Usuario {
   sede            Sede?   @relation(fields: [sedeId], references: [id])
   turnosAtendidos Turno[]
   citasDecididas  Cita[]  @relation("CitaDecididaPor")
+  fichasEmitidas  Ficha[] @relation("FichaEmitidaPor")
 
   @@index([sedeId])
   @@map("usuarios")
@@ -148,6 +164,8 @@ model Servicio {
   // false = la cita queda CONFIRMADA al reservar (ej. certificados, caja).
   // true  = queda PENDIENTE hasta que el personal la apruebe (ej. Dirección).
   requiereAprobacion Boolean @default(false)
+  // FICHAS: cuántas se entregan por día. null = el servicio no usa fichas.
+  fichasPorDia Int?
   activo      Boolean  @default(true)
   creadoEn    DateTime @default(now())
   actualizadoEn DateTime @updatedAt
@@ -157,6 +175,7 @@ model Servicio {
   ventanillas  VentanillaServicio[]
   citas        Cita[]
   turnos       Turno[]
+  fichas       Ficha[]
   contadores   ContadorTurno[]
 
   @@unique([sedeId, nombre])
@@ -290,6 +309,7 @@ model Turno {
   sedeId        String
   servicioId    String
   citaId        String?        @unique // 1 cita -> máximo 1 turno
+  fichaId       String?        @unique // 1 ficha -> máximo 1 turno
   solicitanteId String?        // null si es visitante sin registro
   ventanillaId  String?        // se asigna al llamarlo
   atendidoPorId String?        // operador que lo atendió
@@ -297,6 +317,7 @@ model Turno {
   fecha         DateTime       @db.Date // día operativo; el contador se reinicia cada día
   numero        Int            // 1, 2, 3... por servicio y día
   codigo        String         // "A-012", lo que ve el público
+  numeroFicha   Int?           // si nació de una ficha: su número (las fichas se atienden por número)
   prioridad     PrioridadTurno @default(NORMAL)
   origen        OrigenTurno    @default(MOSTRADOR)
   estado        EstadoTurno    @default(ESPERANDO)
@@ -314,6 +335,7 @@ model Turno {
   sede        Sede         @relation(fields: [sedeId], references: [id])
   servicio    Servicio     @relation(fields: [servicioId], references: [id])
   cita        Cita?        @relation(fields: [citaId], references: [id])
+  ficha       Ficha?       @relation(fields: [fichaId], references: [id])
   solicitante Solicitante? @relation(fields: [solicitanteId], references: [id])
   ventanilla  Ventanilla?  @relation(fields: [ventanillaId], references: [id])
   atendidoPor Usuario?     @relation(fields: [atendidoPorId], references: [id])
@@ -338,4 +360,38 @@ model ContadorTurno {
 
   @@id([servicioId, fecha])
   @@map("contadores_turno")
+}
+
+// Ficha: número con CUPO limitado por día y sin hora. Se entregan en persona (la genera el
+// personal) hasta llenar el cupo del servicio; a quien sigue se le da una ficha para otro día.
+// El día de la ficha, la persona llega, hace check-in y entra a la cola (se atiende por número).
+// Código visible: "P-F012" (prefijo del servicio + F + número); no choca con un turno ("P-012").
+model Ficha {
+  id           String      @id @default(uuid())
+  sedeId       String
+  servicioId   String
+  fecha        DateTime    @db.Date // el día para el que vale la ficha
+  numero       Int         // 1, 2, 3... por servicio y fecha; no se reutiliza si se cancela
+  codigo       String
+  estado       EstadoFicha @default(ACTIVA)
+
+  nombre       String      // a quién se le entregó
+  documento    String?
+  telefono     String?
+  referencia   String?     // la persona atendida (hijo, paciente), según el rubro
+  emitidaPorId String?     // operador que la entregó
+
+  creadoEn      DateTime  @default(now())
+  canceladaEn   DateTime?
+  actualizadoEn DateTime  @updatedAt
+
+  sede       Sede     @relation(fields: [sedeId], references: [id])
+  servicio   Servicio @relation(fields: [servicioId], references: [id])
+  emitidaPor Usuario? @relation("FichaEmitidaPor", fields: [emitidaPorId], references: [id])
+  turno      Turno?   // se crea al hacer check-in
+
+  // No pueden existir dos "P-F012" el mismo día
+  @@unique([servicioId, fecha, numero])
+  @@index([sedeId, fecha])
+  @@map("fichas")
 }

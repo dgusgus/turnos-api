@@ -13,6 +13,7 @@ export interface TurnoRow {
   llamadoEn: Date | null;
   inicioAtencionEn: Date | null;
   finAtencionEn: Date | null;
+  ficha?: { codigo: string } | null;
   servicio: { id: string; nombre: string; prefijo: string };
   ventanilla: { id: string; nombre: string } | null;
   cita: {
@@ -37,6 +38,7 @@ export const toTurnoDto = (t: TurnoRow) => ({
   nombre: t.cita ? `${t.cita.nombres} ${t.cita.apellidos}` : t.nombreVisitante,
   estudiante: t.cita ? t.cita.estudianteNombre : t.estudianteReferencia,
   observacion: t.observacion,
+  ficha: t.ficha ? { codigo: t.ficha.codigo } : null,
   cita: t.cita ? { codigo: t.cita.codigoPublico, inicio: t.cita.inicio.toISOString() } : null,
   creadoEn: t.creadoEn.toISOString(),
   llamadoEn: iso(t.llamadoEn),
